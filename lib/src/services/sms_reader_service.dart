@@ -81,6 +81,80 @@ class SmsReaderService {
     }
   }
 
+  Future<AppConfig> loadPersistedAppConfig(AppConfig baseConfig) async {
+    if (!supportsSmsReading) {
+      AppLogger.warn(
+        'SmsReaderService',
+        'Skipped persisted settings load because SMS reading is unsupported.',
+      );
+      return baseConfig;
+    }
+
+    try {
+      AppLogger.info('SmsReaderService', 'Loading persisted runtime settings.');
+      final rawConfig = await _channel.invokeMapMethod<String, dynamic>('loadRuntimeSettings');
+      if (rawConfig == null) {
+        return baseConfig;
+      }
+
+      final senderFilters =
+          (rawConfig['senderFilters'] as List<dynamic>? ?? const <dynamic>[])
+              .map((value) => value.toString().trim())
+              .where((value) => value.isNotEmpty)
+              .toList(growable: false);
+      final autoAnswerNumbers =
+          (rawConfig['autoAnswerNumbers'] as List<dynamic>? ?? const <dynamic>[])
+              .map((value) => value.toString().trim())
+              .where((value) => value.isNotEmpty)
+              .toList(growable: false);
+      final legacyAutoAnswerNumber = (rawConfig['autoAnswerNumber'] as String?)?.trim();
+      final autoHandleEnabled = rawConfig['autoHandleEnabled'] as bool? ?? false;
+      final autoHangUpDelaySeconds =
+          _resolveNonNegativeInt(
+            rawConfig['autoHangUpDelaySeconds'],
+            fallbackValue: baseConfig.autoHangUpDelaySeconds,
+          );
+      final postAnswerDtmfSteps = _resolvePostAnswerDtmfSteps(
+        rawConfig,
+        baseConfig,
+      );
+
+      final resolvedConfig = baseConfig.copyWith(
+        senderFilters: senderFilters,
+        autoHandleEnabled: autoHandleEnabled,
+        autoAnswerNumbers: autoAnswerNumbers.isNotEmpty
+            ? autoAnswerNumbers
+            : <String>[
+                if (legacyAutoAnswerNumber != null && legacyAutoAnswerNumber.isNotEmpty)
+                  legacyAutoAnswerNumber,
+              ],
+        autoHangUpDelaySeconds: autoHangUpDelaySeconds,
+        postAnswerDtmfSteps: postAnswerDtmfSteps,
+      );
+      AppLogger.info(
+        'SmsReaderService',
+        'Loaded persisted runtime settings.',
+        data: <String, Object?>{
+          'senderFilters': resolvedConfig.senderFilters,
+          'autoHandleEnabled': resolvedConfig.autoHandleEnabled,
+          'autoAnswerNumbersCount': resolvedConfig.autoAnswerNumbers.length,
+          'autoHangUpDelaySeconds': resolvedConfig.autoHangUpDelaySeconds,
+          'postAnswerDtmfSteps': resolvedConfig.postAnswerDtmfSteps
+              .map((step) => step.toChannelMap())
+              .toList(growable: false),
+        },
+      );
+      return resolvedConfig;
+    } on MissingPluginException {
+      AppLogger.warn(
+        'SmsReaderService',
+        'Persisted runtime settings are unavailable on the current runtime. '
+            'Restart the app after native changes to enable them.',
+      );
+      return baseConfig;
+    }
+  }
+
   Future<void> syncBackgroundApiConfig(AppConfig appConfig) async {
     if (!supportsSmsReading) {
       AppLogger.warn(
@@ -97,6 +171,12 @@ class SmsReaderService {
         data: <String, Object?>{
           'apiBaseUrl': appConfig.apiBaseUrl,
           'senderFilters': appConfig.senderFilters,
+          'autoHandleEnabled': appConfig.autoHandleEnabled,
+          'autoAnswerNumbersCount': appConfig.autoAnswerNumbers.length,
+          'autoHangUpDelaySeconds': appConfig.autoHangUpDelaySeconds,
+          'postAnswerDtmfSteps': appConfig.postAnswerDtmfSteps
+              .map((step) => step.toChannelMap())
+              .toList(growable: false),
         },
       );
       await _channel.invokeMethod<void>('syncBackgroundApiConfig', <String, Object?>{
@@ -105,6 +185,12 @@ class SmsReaderService {
         'apiReferer': appConfig.apiReferer,
         'visaClientHeaderValue': appConfig.visaClientHeaderValue,
         'senderFilters': appConfig.senderFilters,
+        'autoHandleEnabled': appConfig.autoHandleEnabled,
+        'autoAnswerNumbers': appConfig.autoAnswerNumbers,
+        'autoHangUpDelaySeconds': appConfig.autoHangUpDelaySeconds,
+        'postAnswerDtmfSteps': appConfig.postAnswerDtmfSteps
+            .map((step) => step.toChannelMap())
+            .toList(growable: false),
       });
     } on MissingPluginException {
       AppLogger.warn(
@@ -112,6 +198,189 @@ class SmsReaderService {
         'Background API config sync is unavailable on the current runtime. '
             'Restart the app after native changes to enable it.',
       );
+    }
+  }
+
+  String _resolveDtmfDigit(
+    Object? rawValue, {
+    required String fallbackValue,
+  }) {
+    if (rawValue == null) {
+      return fallbackValue;
+    }
+
+    final normalizedValue = rawValue.toString().trim().toUpperCase();
+    if (normalizedValue.isEmpty) {
+      return '';
+    }
+
+    final candidate = normalizedValue.substring(0, 1);
+    return RegExp(r'^[0-9*#A-D]$').hasMatch(candidate)
+        ? candidate
+        : fallbackValue;
+  }
+
+  List<PostAnswerDtmfStep> _resolvePostAnswerDtmfSteps(
+    Map<String, dynamic> rawConfig,
+    AppConfig baseConfig,
+  ) {
+    if (rawConfig.containsKey('postAnswerDtmfSteps')) {
+      final rawSteps = rawConfig['postAnswerDtmfSteps'] as List<dynamic>?;
+      return (rawSteps ?? const <dynamic>[])
+          .map(_resolvePostAnswerDtmfStep)
+          .whereType<PostAnswerDtmfStep>()
+          .toList(growable: false);
+    }
+
+    final legacyFirstStep = _resolveLegacyPostAnswerDtmfStep(
+      digitValue: rawConfig['postAnswerFirstDtmfDigit'],
+      delayValue: rawConfig['postAnswerFirstDtmfDelaySeconds'],
+      fallbackStep: _fallbackPostAnswerDtmfStep(baseConfig, 0),
+    );
+    final legacySecondStep = _resolveLegacyPostAnswerDtmfStep(
+      digitValue: rawConfig['postAnswerSecondDtmfDigit'],
+      delayValue: rawConfig['postAnswerSecondDtmfDelaySeconds'],
+      fallbackStep: _fallbackPostAnswerDtmfStep(baseConfig, 1),
+    );
+
+    return <PostAnswerDtmfStep>[
+      if (legacyFirstStep case final step?) step,
+      if (legacySecondStep case final step?) step,
+    ];
+  }
+
+  PostAnswerDtmfStep? _fallbackPostAnswerDtmfStep(
+    AppConfig baseConfig,
+    int index,
+  ) {
+    if (index < baseConfig.postAnswerDtmfSteps.length) {
+      return baseConfig.postAnswerDtmfSteps[index];
+    }
+    if (index < defaultPostAnswerDtmfSteps.length) {
+      return defaultPostAnswerDtmfSteps[index];
+    }
+    return null;
+  }
+
+  PostAnswerDtmfStep? _resolvePostAnswerDtmfStep(Object? rawValue) {
+    if (rawValue is! Map<Object?, Object?>) {
+      return null;
+    }
+
+    final digit = _resolveDtmfDigit(rawValue['digit'], fallbackValue: '');
+    if (digit.isEmpty) {
+      return null;
+    }
+
+    return PostAnswerDtmfStep(
+      digit: digit,
+      delaySeconds: _resolveNonNegativeInt(rawValue['delaySeconds'], fallbackValue: 0),
+    );
+  }
+
+  PostAnswerDtmfStep? _resolveLegacyPostAnswerDtmfStep({
+    required Object? digitValue,
+    required Object? delayValue,
+    required PostAnswerDtmfStep? fallbackStep,
+  }) {
+    final digit = _resolveDtmfDigit(
+      digitValue,
+      fallbackValue: fallbackStep?.digit ?? '',
+    );
+    if (digit.isEmpty) {
+      return null;
+    }
+
+    return PostAnswerDtmfStep(
+      digit: digit,
+      delaySeconds: _resolveNonNegativeInt(
+        delayValue,
+        fallbackValue: fallbackStep?.delaySeconds ?? 0,
+      ),
+    );
+  }
+
+  int _resolveNonNegativeInt(
+    Object? rawValue, {
+    required int fallbackValue,
+  }) {
+    if (rawValue == null) {
+      return fallbackValue;
+    }
+
+    final parsedValue = rawValue is num
+        ? rawValue.toInt()
+        : int.tryParse(rawValue.toString().trim());
+    if (parsedValue == null) {
+      return fallbackValue;
+    }
+
+    return parsedValue < 0 ? 0 : parsedValue;
+  }
+
+  Future<bool> isDefaultDialer() async {
+    if (!supportsSmsReading) {
+      AppLogger.warn(
+        'SmsReaderService',
+        'Skipped default phone app check because Android call integration is unsupported.',
+      );
+      return false;
+    }
+
+    try {
+      final isDefaultDialer = await _channel.invokeMethod<bool>('isDefaultDialer') ?? false;
+      AppLogger.info(
+        'SmsReaderService',
+        'Checked default phone app role.',
+        data: <String, Object?>{'isDefaultDialer': isDefaultDialer},
+      );
+      return isDefaultDialer;
+    } on MissingPluginException {
+      AppLogger.warn(
+        'SmsReaderService',
+        'Default phone app checks are unavailable on the current runtime. '
+            'Restart the app after native changes to enable them.',
+      );
+      return false;
+    }
+  }
+
+  Future<bool> requestDefaultDialerRole() async {
+    if (!supportsSmsReading) {
+      AppLogger.warn(
+        'SmsReaderService',
+        'Skipped default phone app request because Android call integration is unsupported.',
+      );
+      return false;
+    }
+
+    try {
+      AppLogger.info(
+        'SmsReaderService',
+        'Requesting default phone app role through native bridge.',
+      );
+      final granted =
+          await _channel.invokeMethod<bool>('requestDefaultDialerRole') ?? false;
+      AppLogger.info(
+        'SmsReaderService',
+        'Completed default phone app role request.',
+        data: <String, Object?>{'granted': granted},
+      );
+      return granted;
+    } on PlatformException catch (error) {
+      AppLogger.warn(
+        'SmsReaderService',
+        'Default phone app role request failed.',
+        data: <String, Object?>{'reason': error.message ?? error.code},
+      );
+      return false;
+    } on MissingPluginException {
+      AppLogger.warn(
+        'SmsReaderService',
+        'Default phone app role requests are unavailable on the current runtime. '
+            'Restart the app after native changes to enable them.',
+      );
+      return false;
     }
   }
 

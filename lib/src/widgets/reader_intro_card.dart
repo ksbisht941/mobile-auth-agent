@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
-import '../theme/app_theme.dart';
 import 'panel_card.dart';
+import 'section_header.dart';
 
 class ReaderIntroCard extends StatelessWidget {
   const ReaderIntroCard({
@@ -23,18 +23,9 @@ class ReaderIntroCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'Read SMS messages from Android and keep only OTP-like messages.',
-            style: Theme.of(context).textTheme.titleMedium?.copyWith(
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            helperText,
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-              color: AppColors.mutedText,
-            ),
+          SectionHeader(
+            icon: Icons.sms_outlined,
+            title: 'SMS access',
           ),
           const SizedBox(height: 16),
           if (!isSupported)

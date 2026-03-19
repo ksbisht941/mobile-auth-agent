@@ -110,6 +110,15 @@ data class BackgroundOtpConfig(
     val apiReferer: String,
     val visaClientHeaderValue: String,
     val senderFilters: List<String>,
+    val autoHandleEnabled: Boolean,
+    val autoAnswerNumbers: List<String>,
+    val autoHangUpDelaySeconds: Int,
+    val postAnswerDtmfSteps: List<PostAnswerDtmfStep>,
+)
+
+data class PostAnswerDtmfStep(
+    val digit: String,
+    val delaySeconds: Int,
 )
 
 internal data class ReceivedSmsPayload(
@@ -157,6 +166,17 @@ object BackgroundOtpConfigStore {
     private const val KEY_API_REFERER = "api_referer"
     private const val KEY_VISA_CLIENT_HEADER_VALUE = "visa_client_header_value"
     private const val KEY_SENDER_FILTERS_JSON = "sender_filters_json"
+    private const val KEY_AUTO_HANDLE_ENABLED = "auto_handle_enabled"
+    private const val KEY_AUTO_ANSWER_NUMBERS_JSON = "auto_answer_numbers_json"
+    private const val KEY_AUTO_ANSWER_NUMBER = "auto_answer_number"
+    private const val KEY_AUTO_HANG_UP_DELAY_SECONDS = "auto_hang_up_delay_seconds"
+    private const val KEY_POST_ANSWER_DTMF_STEPS_JSON = "post_answer_dtmf_steps_json"
+    private const val KEY_POST_ANSWER_FIRST_DTMF_DIGIT = "post_answer_first_dtmf_digit"
+    private const val KEY_POST_ANSWER_FIRST_DTMF_DELAY_SECONDS =
+        "post_answer_first_dtmf_delay_seconds"
+    private const val KEY_POST_ANSWER_SECOND_DTMF_DIGIT = "post_answer_second_dtmf_digit"
+    private const val KEY_POST_ANSWER_SECOND_DTMF_DELAY_SECONDS =
+        "post_answer_second_dtmf_delay_seconds"
 
     fun saveConfig(
         context: Context,
@@ -165,6 +185,10 @@ object BackgroundOtpConfigStore {
         apiReferer: String,
         visaClientHeaderValue: String,
         senderFilters: List<String>,
+        autoHandleEnabled: Boolean,
+        autoAnswerNumbers: List<String>,
+        autoHangUpDelaySeconds: Int,
+        postAnswerDtmfSteps: List<PostAnswerDtmfStep>,
     ) {
         if (apiBaseUrl.isBlank()) {
             return
@@ -177,6 +201,15 @@ object BackgroundOtpConfigStore {
             .putString(KEY_API_REFERER, apiReferer.trim())
             .putString(KEY_VISA_CLIENT_HEADER_VALUE, visaClientHeaderValue.trim())
             .putString(KEY_SENDER_FILTERS_JSON, stringListToJson(senderFilters))
+            .putBoolean(KEY_AUTO_HANDLE_ENABLED, autoHandleEnabled)
+            .putString(KEY_AUTO_ANSWER_NUMBERS_JSON, stringListToJson(autoAnswerNumbers))
+            .putInt(KEY_AUTO_HANG_UP_DELAY_SECONDS, autoHangUpDelaySeconds.coerceAtLeast(0))
+            .putString(KEY_POST_ANSWER_DTMF_STEPS_JSON, dtmfStepsToJson(postAnswerDtmfSteps))
+            .remove(KEY_POST_ANSWER_FIRST_DTMF_DIGIT)
+            .remove(KEY_POST_ANSWER_FIRST_DTMF_DELAY_SECONDS)
+            .remove(KEY_POST_ANSWER_SECOND_DTMF_DIGIT)
+            .remove(KEY_POST_ANSWER_SECOND_DTMF_DELAY_SECONDS)
+            .remove(KEY_AUTO_ANSWER_NUMBER)
             .apply()
     }
 
@@ -196,7 +229,138 @@ object BackgroundOtpConfigStore {
             visaClientHeaderValue =
                 preferences.getString(KEY_VISA_CLIENT_HEADER_VALUE, "1")?.trim().orEmpty(),
             senderFilters = jsonToStringList(preferences.getString(KEY_SENDER_FILTERS_JSON, null)),
+            autoHandleEnabled = preferences.getBoolean(KEY_AUTO_HANDLE_ENABLED, false),
+            autoAnswerNumbers = loadAutoAnswerNumbers(preferences),
+            autoHangUpDelaySeconds =
+                preferences.getInt(KEY_AUTO_HANG_UP_DELAY_SECONDS, 20).coerceAtLeast(0),
+            postAnswerDtmfSteps = loadPostAnswerDtmfSteps(preferences),
         )
+    }
+
+    private fun normalizeDtmfDigit(value: String?): String? {
+        val trimmedValue = value?.trim().orEmpty().uppercase(Locale.US)
+        if (trimmedValue.isEmpty()) {
+            return null
+        }
+
+        val candidate = trimmedValue.first().toString()
+        return candidate.takeIf { it.matches(Regex("[0-9*#A-D]")) }
+    }
+
+    private fun loadPostAnswerDtmfSteps(
+        preferences: android.content.SharedPreferences,
+    ): List<PostAnswerDtmfStep> {
+        if (preferences.contains(KEY_POST_ANSWER_DTMF_STEPS_JSON)) {
+            return jsonToPostAnswerDtmfSteps(
+                preferences.getString(KEY_POST_ANSWER_DTMF_STEPS_JSON, null),
+            )
+        }
+
+        return loadLegacyPostAnswerDtmfSteps(preferences)
+    }
+
+    private fun loadLegacyPostAnswerDtmfSteps(
+        preferences: android.content.SharedPreferences,
+    ): List<PostAnswerDtmfStep> {
+        return listOfNotNull(
+            loadLegacyPostAnswerDtmfStep(
+                preferences = preferences,
+                digitKey = KEY_POST_ANSWER_FIRST_DTMF_DIGIT,
+                delayKey = KEY_POST_ANSWER_FIRST_DTMF_DELAY_SECONDS,
+                defaultDigit = "1",
+                defaultDelaySeconds = 4,
+            ),
+            loadLegacyPostAnswerDtmfStep(
+                preferences = preferences,
+                digitKey = KEY_POST_ANSWER_SECOND_DTMF_DIGIT,
+                delayKey = KEY_POST_ANSWER_SECOND_DTMF_DELAY_SECONDS,
+                defaultDigit = "9",
+                defaultDelaySeconds = 10,
+            ),
+        )
+    }
+
+    private fun loadLegacyPostAnswerDtmfStep(
+        preferences: android.content.SharedPreferences,
+        digitKey: String,
+        delayKey: String,
+        defaultDigit: String,
+        defaultDelaySeconds: Int,
+    ): PostAnswerDtmfStep? {
+        val digit = normalizeDtmfDigit(preferences.getString(digitKey, defaultDigit)) ?: return null
+        return PostAnswerDtmfStep(
+            digit = digit,
+            delaySeconds = preferences.getInt(delayKey, defaultDelaySeconds).coerceAtLeast(0),
+        )
+    }
+
+    private fun dtmfStepsToJson(values: List<PostAnswerDtmfStep>): String {
+        val jsonArray = JSONArray()
+        normalizePostAnswerDtmfSteps(values).forEach { step ->
+            jsonArray.put(
+                JSONObject()
+                    .put("digit", step.digit)
+                    .put("delaySeconds", step.delaySeconds),
+            )
+        }
+        return jsonArray.toString()
+    }
+
+    private fun jsonToPostAnswerDtmfSteps(rawJson: String?): List<PostAnswerDtmfStep> {
+        if (rawJson.isNullOrBlank()) {
+            return emptyList()
+        }
+
+        return try {
+            val jsonArray = JSONArray(rawJson)
+            buildList {
+                for (index in 0 until jsonArray.length()) {
+                    val jsonObject = jsonArray.optJSONObject(index) ?: continue
+                    val digit = normalizeDtmfDigit(jsonObject.optString("digit", null)) ?: continue
+                    val delaySeconds =
+                        when (val rawDelay = jsonObject.opt("delaySeconds")) {
+                            is Number -> rawDelay.toInt()
+                            else -> rawDelay?.toString()?.trim()?.toIntOrNull() ?: 0
+                        }
+                    add(
+                        PostAnswerDtmfStep(
+                            digit = digit,
+                            delaySeconds = delaySeconds.coerceAtLeast(0),
+                        ),
+                    )
+                }
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun normalizePostAnswerDtmfSteps(
+        values: List<PostAnswerDtmfStep>,
+    ): List<PostAnswerDtmfStep> {
+        return values.mapNotNull { step ->
+            val digit = normalizeDtmfDigit(step.digit) ?: return@mapNotNull null
+            PostAnswerDtmfStep(
+                digit = digit,
+                delaySeconds = step.delaySeconds.coerceAtLeast(0),
+            )
+        }
+    }
+
+    private fun loadAutoAnswerNumbers(preferences: android.content.SharedPreferences): List<String> {
+        val storedNumbers =
+            jsonToStringList(preferences.getString(KEY_AUTO_ANSWER_NUMBERS_JSON, null))
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+        if (storedNumbers.isNotEmpty()) {
+            return storedNumbers
+        }
+
+        val legacyNumber =
+            preferences.getString(KEY_AUTO_ANSWER_NUMBER, null)
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+        return legacyNumber?.let(::listOf) ?: emptyList()
     }
 
     private fun stringListToJson(values: List<String>): String {
@@ -306,6 +470,11 @@ object BackgroundOtpProcessor {
         val config = BackgroundOtpConfigStore.loadConfig(context)
         if (config == null) {
             Log.i(BACKGROUND_OTP_TAG, "Skipped background OTP sync because config was unavailable.")
+            return false
+        }
+
+        if (!config.autoHandleEnabled) {
+            Log.i(BACKGROUND_OTP_TAG, "Skipped background OTP sync because auto handling is disabled.")
             return false
         }
 
@@ -485,7 +654,7 @@ object SmsBackgroundStore {
 object ApiCallHistoryStore {
     private const val PREFERENCES_NAME = "otp_message_reader_api_history"
     private const val KEY_ENTRIES_JSON = "entries_json"
-    private const val MAX_ENTRIES = 50
+    private const val MAX_ENTRIES = 5
 
     fun appendEntry(
         context: Context,

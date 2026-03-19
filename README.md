@@ -1,8 +1,8 @@
 # Mobile Auth Agent
 
-Mobile Auth Agent is an Android-focused Flutter application that reads SMS inbox messages, extracts one-time passwords (OTPs), and forwards the latest detected OTP to an external API.
+Mobile Auth Agent is an Android-focused Flutter application that reads SMS inbox messages, extracts one-time passwords (OTPs), forwards the latest detected OTP to an external API, and can optionally automate configured incoming call flows.
 
-The app is designed for operational OTP forwarding workflows where incoming verification codes must be detected quickly, displayed in the UI, and optionally synchronized to a backend service with enough safeguards to avoid accidental duplicate sends.
+The app is designed for operational OTP forwarding workflows where incoming verification codes must be detected quickly, displayed in the UI, optionally synchronized to a backend service, and in some cases paired with Android-side call automation for configured verification numbers.
 
 ## What the app does
 
@@ -15,21 +15,29 @@ At a high level, the app:
 - automatically sends newly detected OTPs to a configured API endpoint
 - listens for incoming SMS events while the app is open
 - processes SMS received while the app is backgrounded via an Android `BroadcastReceiver`
-- stores API call history locally for review in the UI
-- allows manual resend by swiping a message tile
+- can auto-answer configured incoming calls on Android
+- can send configured keypad/DTMF actions after pickup
+- can automatically hang up handled calls after a configurable delay
+- stores the last 5 API call history entries locally for review in the UI
+- allows manual resend by swiping right on a full-width message tile
 
 ## Current platform support
 
-The repository contains the default Flutter platform folders, but the OTP-reading functionality is implemented for **Android**.
+The repository contains the default Flutter platform folders, but the SMS/OTP reading and call automation functionality is implemented for **Android**.
 
-SMS reading and realtime/background SMS handling depend on Android platform APIs such as:
+SMS reading, realtime/background SMS handling, and configured call automation depend on Android platform APIs such as:
 
 - `READ_SMS`
 - `RECEIVE_SMS`
 - `POST_NOTIFICATIONS`
+- `READ_PHONE_STATE`
+- `ANSWER_PHONE_CALLS`
 - Android `MethodChannel`
 - Android `EventChannel`
+- Android `InCallService`
 - a manifest-declared `BroadcastReceiver`
+
+The automatic call handling flow also depends on the user granting the app the default phone app role when Android requires it.
 
 ## Main user-facing features
 
@@ -58,7 +66,7 @@ with these headers:
 
 - `origin`
 - `referer`
-- `visa-client`
+- a custom client header required by the target API
 
 ### 3. Realtime foreground SMS handling
 
@@ -89,7 +97,10 @@ This is intentionally more permissive than a pure `sender + otp` dedupe strategy
 
 ### 6. Manual resend
 
-Users can swipe left on a message tile to resend that OTP to the API manually.
+Users can swipe right on a full-width message tile to resend that OTP to the API manually.
+
+The manual resend gesture triggers the API call after roughly 30% swipe progress,
+while the visible card movement is capped at 40% of the tile width before snapping back.
 
 This is useful when:
 
@@ -97,9 +108,24 @@ This is useful when:
 - the user wants to retry a previously detected OTP
 - the backend needs to be retriggered intentionally
 
-### 7. API history screen
+### 7. Automatic call handling for configured numbers
+
+When automatic handling is enabled and one or more target numbers are configured, the app can assist with verification calls as well as OTP SMS traffic.
+
+The current Android implementation can:
+
+- show an auto-answer setup card when call automation is configured
+- prompt the user to set the app as the default phone app when needed
+- auto-answer matching incoming calls after a short delay
+- send optional post-answer keypad/DTMF steps such as `1`, `9`, `*`, or `#`
+- disconnect the handled call automatically after the configured timeout
+
+This is intended for controlled verification/IVR workflows where the same Android device is expected to receive both OTP SMS messages and follow-up calls.
+
+### 8. API history screen
 
 The app persists API call history and exposes it in a dedicated history page.
+Only the latest 5 entries are retained and shown.
 
 Stored history includes:
 
@@ -142,10 +168,12 @@ Optional sender filtering is also supported via configuration.
 - `lib/src/pages/otp_reader_page.dart`
   - main screen
   - coordinates permission flow, inbox reads, realtime refresh, API sync, dedupe, and UI state
+- `lib/src/pages/settings_page.dart`
+  - runtime settings screen for sender filters, auto-answer numbers, hang-up timing, DTMF steps, and API history review
 - `lib/src/pages/api_history_page.dart`
   - shows saved API request history
 - `lib/src/services/sms_reader_service.dart`
-  - Flutter-facing bridge for Android SMS/native APIs
+  - Flutter-facing bridge for Android SMS/native APIs, runtime config sync, and default phone app role checks/requests
 - `lib/src/services/otp_message_filter.dart`
   - OTP detection and extraction logic
 - `lib/src/services/otp_api_service.dart`
@@ -157,16 +185,22 @@ Optional sender filtering is also supported via configuration.
 
 ### Android layer
 
-- `android/app/src/main/kotlin/com/visa2fly/otp_message_reader/MainActivity.kt`
-  - exposes a `MethodChannel` for permissions, inbox reads, config sync, history storage, and background state queries
+- `android/app/src/main/kotlin/.../MainActivity.kt`
+  - exposes a `MethodChannel` for permissions, inbox reads, config sync, history storage, default phone app role checks, and background state queries
   - exposes an `EventChannel` for foreground incoming SMS events
-- `android/app/src/main/kotlin/com/visa2fly/otp_message_reader/SmsBackgroundReceiver.kt`
+- `android/app/src/main/kotlin/.../SmsBackgroundReceiver.kt`
   - receives `SMS_RECEIVED`
   - merges multipart SMS messages
   - forwards foreground SMS payloads to Flutter
   - performs background OTP processing and API sync
   - stores background-handled keys and pending counts
   - manages local notifications and API history persistence
+- `android/app/src/main/kotlin/.../CallService.kt`
+  - watches active/ringing calls through Android `InCallService`
+  - auto-answers configured incoming numbers
+  - triggers post-answer DTMF steps and scheduled disconnects
+- `android/app/src/main/kotlin/.../CallActionReceiver.kt`
+  - receives delayed/native call actions used by the call automation flow
 
 ## Runtime flow
 
@@ -197,6 +231,14 @@ Optional sender filtering is also supported via configuration.
 4. the handled OTP key is persisted to avoid duplicate foreground sync later
 5. a pending-message count is stored for the Flutter UI to consume after resume
 
+### Automatic call flow
+
+1. Flutter syncs runtime call settings to native Android storage
+2. Android `CallService` observes ringing calls through `InCallService`
+3. if automatic handling is enabled and the incoming number matches a configured target, the call is answered after a short delay
+4. once the call is active, optional post-answer keypad/DTMF steps are sent in sequence
+5. if auto hang-up is enabled, the call is disconnected after the configured delay
+
 ## Configuration
 
 The real runtime configuration is kept in:
@@ -224,17 +266,30 @@ The current `AppConfig` fields are:
 - `apiBaseUrl`
 - `apiOrigin`
 - `apiReferer`
-- `visaClientHeaderValue`
 - `senderFilters`
+- `autoHandleEnabled`
+- `autoAnswerNumbers`
+- `autoHangUpDelaySeconds`
+- `postAnswerDtmfSteps`
+
+The config also includes a custom client header value used by the outbound API request.
 
 The example config uses placeholder values and should be replaced locally.
 
 ### Example configuration options
 
 - `apiBaseUrl`
-  - base path for the OTP API, for example `https://devapi.visa2fly.com/api`
+  - base path for the OTP API, for example `https://api.example.com/api`
 - `senderFilters`
-  - optional list of sender substrings used to restrict matching, for example `['VISATF']`
+  - optional list of sender substrings used to restrict matching, for example `['BANKOTP']`
+- `autoHandleEnabled`
+  - enables the combined OTP/call automation flow when set to `true`
+- `autoAnswerNumbers`
+  - list of phone numbers that should be auto-answered when they call the device
+- `autoHangUpDelaySeconds`
+  - number of seconds to keep an auto-answered call active before disconnecting; `0` disables auto hang-up
+- `postAnswerDtmfSteps`
+  - optional keypad actions to send after pickup; each step is a `{digit, delaySeconds}` pair
 
 If you want to change environments, update your local `app_config.dart` or inject a different `AppConfig` into `MyApp`.
 
@@ -245,10 +300,16 @@ The Android manifest currently declares:
 - `android.permission.READ_SMS`
 - `android.permission.RECEIVE_SMS`
 - `android.permission.POST_NOTIFICATIONS`
+- `android.permission.READ_PHONE_STATE`
+- `android.permission.ANSWER_PHONE_CALLS`
 
 It also registers `SmsBackgroundReceiver` for:
 
 - `android.provider.Telephony.SMS_RECEIVED`
+
+And it registers `CallService` as an Android `InCallService` so the app can react to configured incoming calls.
+
+For devices and Android versions that enforce dialer-role restrictions, auto-answer behavior requires setting this app as the default phone app.
 
 ## Local development
 
@@ -267,7 +328,7 @@ cp lib/src/config/app_config.example.dart lib/src/config/app_config.dart
 flutter run
 ```
 
-Because this project includes native Android code for SMS handling, perform a **full rebuild** after Kotlin/manifest changes instead of relying only on hot reload.
+Because this project includes native Android code for SMS and call handling, perform a **full rebuild** after Kotlin/manifest changes instead of relying only on hot reload.
 
 ## Testing
 
@@ -281,6 +342,8 @@ The project includes unit and widget tests covering:
 - background-handled OTP suppression
 - realtime incoming SMS event processing
 - race-condition protection for queued incoming refreshes
+- runtime config sync for auto-answer settings
+- auto-answer setup UI and default phone app role requests
 
 Useful commands:
 
@@ -296,6 +359,7 @@ flutter analyze
 - A timeout usually means network reachability, IP routing, firewall, or protocol mismatch.
 - If foreground SMS events appear to be ignored after native code changes, rebuild and reinstall the app.
 - Sender filters are optional; if configured, only senders containing those substrings are considered.
+- If automatic call handling is configured, verify the app has been granted the default phone app role before expecting Android to auto-answer calls.
 
 ## Repository status and intent
 
@@ -303,6 +367,7 @@ This is not a generic starter Flutter app anymore. It is a workflow-driven Andro
 
 - native Android SMS integration
 - realtime and background OTP processing
+- configurable automatic call handling
 - external API synchronization
 - retry support
 - local audit history

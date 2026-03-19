@@ -7,7 +7,7 @@ import '../app_logger.dart';
 import '../config/app_config.dart';
 import '../models/otp_match.dart';
 import '../models/sms_message.dart';
-import 'api_history_page.dart';
+import 'settings_page.dart';
 import '../services/otp_api_service.dart';
 import '../services/otp_message_filter.dart';
 import '../services/sms_reader_service.dart';
@@ -16,6 +16,7 @@ import '../widgets/message_body_sheet.dart';
 import '../widgets/otp_message_tile.dart';
 import '../widgets/panel_card.dart';
 import '../widgets/reader_intro_card.dart';
+import '../widgets/section_header.dart';
 import '../widgets/reader_status_card.dart';
 
 class OtpReaderPage extends StatefulWidget {
@@ -38,7 +39,10 @@ class OtpReaderPage extends StatefulWidget {
 
 class _OtpReaderPageState extends State<OtpReaderPage>
     with WidgetsBindingObserver {
+  late AppConfig _appConfig;
   bool _hasPermission = false;
+  bool _isDefaultDialer = false;
+  bool _isDialerRoleRequestInProgress = false;
   bool _isLoading = false;
   bool _pendingIncomingRefresh = false;
   String? _errorMessage;
@@ -54,26 +58,58 @@ class _OtpReaderPageState extends State<OtpReaderPage>
   @override
   void initState() {
     super.initState();
+    _appConfig = widget.appConfig;
+    WidgetsBinding.instance.addObserver(this);
+    unawaited(_initializePage());
+  }
+
+  Future<void> _initializePage() async {
     AppLogger.info(
       'OtpReaderPage',
       'Initializing OTP reader page.',
       data: <String, Object?>{
         'apiBaseUrl': widget.appConfig.apiBaseUrl,
         'senderFilters': widget.appConfig.senderFilters,
+        'autoHandleEnabled': widget.appConfig.autoHandleEnabled,
+        'autoAnswerNumbersCount': widget.appConfig.autoAnswerNumbers.length,
       },
     );
-    unawaited(widget.smsReaderService.syncBackgroundApiConfig(widget.appConfig));
-    WidgetsBinding.instance.addObserver(this);
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _loadPermissionStatus();
+
+    final resolvedConfig = await widget.smsReaderService.loadPersistedAppConfig(
+      widget.appConfig,
+    );
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _appConfig = resolvedConfig;
     });
+
+    await widget.smsReaderService.syncBackgroundApiConfig(_appConfig);
+    if (!mounted) {
+      return;
+    }
+
+    await _loadPermissionStatus();
+    if (!mounted || !_shouldShowAutoAnswerSetup) {
+      return;
+    }
+
+    await _loadDefaultDialerStatus();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      AppLogger.info('OtpReaderPage', 'App resumed. Checking pending background SMS.');
+      AppLogger.info(
+        'OtpReaderPage',
+        'App resumed. Checking pending background SMS.',
+      );
       unawaited(_checkForPendingBackgroundMessages());
+      if (_shouldShowAutoAnswerSetup) {
+        unawaited(_loadDefaultDialerStatus());
+      }
     }
   }
 
@@ -85,7 +121,13 @@ class _OtpReaderPageState extends State<OtpReaderPage>
     super.dispose();
   }
 
-  bool get _hasSenderFilters => widget.appConfig.senderFilters.isNotEmpty;
+  bool get _hasSenderFilters => _appConfig.senderFilters.isNotEmpty;
+
+  bool get _isAutoHandleEnabled => _appConfig.autoHandleEnabled;
+
+  bool get _shouldShowAutoAnswerSetup => _appConfig.shouldAutoHandleCalls;
+
+  List<String> get _autoAnswerNumbers => _appConfig.autoAnswerNumbers;
 
   String get _helperText => _hasPermission
       ? 'Pull down to refresh and load OTP messages.'
@@ -101,6 +143,28 @@ class _OtpReaderPageState extends State<OtpReaderPage>
     }
 
     return 'No OTP messages matched the current filters.';
+  }
+
+  Future<void> _loadDefaultDialerStatus() async {
+    if (!_shouldShowAutoAnswerSetup ||
+        !widget.smsReaderService.supportsSmsReading) {
+      return;
+    }
+
+    final isDefaultDialer = await widget.smsReaderService.isDefaultDialer();
+    if (!mounted) {
+      return;
+    }
+
+    AppLogger.info(
+      'OtpReaderPage',
+      'Loaded default phone app status.',
+      data: <String, Object?>{'isDefaultDialer': isDefaultDialer},
+    );
+
+    setState(() {
+      _isDefaultDialer = isDefaultDialer;
+    });
   }
 
   Future<void> _loadPermissionStatus() async {
@@ -136,7 +200,8 @@ class _OtpReaderPageState extends State<OtpReaderPage>
     _updateIncomingMessagesSubscription();
 
     if (hasPermission) {
-      final loadedFromPendingBackground = await _checkForPendingBackgroundMessages();
+      final loadedFromPendingBackground =
+          await _checkForPendingBackgroundMessages();
       if (!mounted || loadedFromPendingBackground) {
         return;
       }
@@ -178,8 +243,44 @@ class _OtpReaderPageState extends State<OtpReaderPage>
     _updateIncomingMessagesSubscription();
   }
 
+  Future<void> _requestDefaultDialerRole() async {
+    if (_isDialerRoleRequestInProgress || !_shouldShowAutoAnswerSetup) {
+      return;
+    }
+
+    AppLogger.info(
+      'OtpReaderPage',
+      'Requesting default phone app role from the user.',
+    );
+
+    setState(() {
+      _isDialerRoleRequestInProgress = true;
+    });
+
+    final granted = await widget.smsReaderService.requestDefaultDialerRole();
+    if (!mounted) {
+      return;
+    }
+
+    AppLogger.info(
+      'OtpReaderPage',
+      'Default phone app role request completed.',
+      data: <String, Object?>{'granted': granted},
+    );
+
+    setState(() {
+      _isDialerRoleRequestInProgress = false;
+      _isDefaultDialer = granted;
+    });
+
+    if (!granted) {
+      unawaited(_loadDefaultDialerStatus());
+    }
+  }
+
   void _updateIncomingMessagesSubscription() {
-    final shouldListen = widget.smsReaderService.supportsSmsReading && _hasPermission;
+    final shouldListen =
+        widget.smsReaderService.supportsSmsReading && _hasPermission;
 
     if (!shouldListen) {
       AppLogger.info(
@@ -193,7 +294,10 @@ class _OtpReaderPageState extends State<OtpReaderPage>
     }
 
     if (_incomingMessagesSubscription != null) {
-      AppLogger.info('OtpReaderPage', 'Incoming SMS listener is already active.');
+      AppLogger.info(
+        'OtpReaderPage',
+        'Incoming SMS listener is already active.',
+      );
       return;
     }
 
@@ -201,50 +305,61 @@ class _OtpReaderPageState extends State<OtpReaderPage>
 
     _incomingMessagesSubscription = widget.smsReaderService
         .watchIncomingMessages()
-        .listen((incomingMessages) {
-          if (!mounted) {
-            return;
-          }
+        .listen(
+          (incomingMessages) {
+            if (!mounted) {
+              return;
+            }
 
-          AppLogger.info(
-            'OtpReaderPage',
-            'Incoming SMS event received. Refreshing inbox.',
-            data: <String, Object?>{'incomingMessages': incomingMessages.length},
-          );
-          unawaited(_refreshForIncomingMessages(incomingMessages: incomingMessages));
-        }, onError: (Object error, StackTrace stackTrace) {
-          if (error is MissingPluginException) {
-            AppLogger.warn(
+            AppLogger.info(
               'OtpReaderPage',
-              'Incoming SMS listener stopped because the native stream is unavailable.',
+              'Incoming SMS event received. Refreshing inbox.',
+              data: <String, Object?>{
+                'incomingMessages': incomingMessages.length,
+              },
             );
-            _incomingMessagesSubscription?.cancel();
-            _incomingMessagesSubscription = null;
-            return;
-          }
+            unawaited(
+              _refreshForIncomingMessages(incomingMessages: incomingMessages),
+            );
+          },
+          onError: (Object error, StackTrace stackTrace) {
+            if (error is MissingPluginException) {
+              AppLogger.warn(
+                'OtpReaderPage',
+                'Incoming SMS listener stopped because the native stream is unavailable.',
+              );
+              _incomingMessagesSubscription?.cancel();
+              _incomingMessagesSubscription = null;
+              return;
+            }
 
-          AppLogger.error(
-            'OtpReaderPage',
-            'Incoming SMS listener emitted an error.',
-            error: error,
-            stackTrace: stackTrace,
-          );
+            AppLogger.error(
+              'OtpReaderPage',
+              'Incoming SMS listener emitted an error.',
+              error: error,
+              stackTrace: stackTrace,
+            );
 
-          FlutterError.reportError(
-            FlutterErrorDetails(
-              exception: error,
-              stack: stackTrace,
-              library: 'otp_message_reader',
-              context: ErrorDescription('while listening for incoming SMS events'),
-            ),
-          );
-        });
+            FlutterError.reportError(
+              FlutterErrorDetails(
+                exception: error,
+                stack: stackTrace,
+                library: 'otp_message_reader',
+                context: ErrorDescription(
+                  'while listening for incoming SMS events',
+                ),
+              ),
+            );
+          },
+        );
   }
 
   Future<void> _refreshForIncomingMessages({
     List<SmsMessage> incomingMessages = const <SmsMessage>[],
   }) async {
-    if (!mounted || !widget.smsReaderService.supportsSmsReading || !_hasPermission) {
+    if (!mounted ||
+        !widget.smsReaderService.supportsSmsReading ||
+        !_hasPermission) {
       AppLogger.warn(
         'OtpReaderPage',
         'Skipped refresh for incoming messages because requirements were not met.',
@@ -263,7 +378,9 @@ class _OtpReaderPageState extends State<OtpReaderPage>
       AppLogger.info(
         'OtpReaderPage',
         'Queued an incoming-message refresh because a read is already in progress.',
-        data: <String, Object?>{'queuedIncomingMessages': _queuedIncomingMessages.length},
+        data: <String, Object?>{
+          'queuedIncomingMessages': _queuedIncomingMessages.length,
+        },
       );
       return;
     }
@@ -277,17 +394,21 @@ class _OtpReaderPageState extends State<OtpReaderPage>
     AppLogger.info(
       'OtpReaderPage',
       'Refreshing OTP messages for incoming SMS.',
-      data: <String, Object?>{'incomingMessages': incomingMessagesForSync.length},
+      data: <String, Object?>{
+        'incomingMessages': incomingMessagesForSync.length,
+      },
     );
 
     await _readOtpMessages(
-      syncNewOtpMatches: true,
+      syncNewOtpMatches: _isAutoHandleEnabled,
       incomingMessagesForSync: incomingMessagesForSync,
     );
   }
 
   Future<bool> _checkForPendingBackgroundMessages() async {
-    if (!widget.smsReaderService.supportsSmsReading || !_hasPermission || _isLoading) {
+    if (!widget.smsReaderService.supportsSmsReading ||
+        !_hasPermission ||
+        _isLoading) {
       AppLogger.info(
         'OtpReaderPage',
         'Skipped pending background SMS check.',
@@ -300,10 +421,18 @@ class _OtpReaderPageState extends State<OtpReaderPage>
       return false;
     }
 
+    if (!_isAutoHandleEnabled) {
+      AppLogger.info(
+        'OtpReaderPage',
+        'Skipped pending background SMS check because auto handling is disabled.',
+      );
+      return false;
+    }
+
     await _consumeBackgroundHandledOtpKeys();
 
-    final pendingMessages =
-        await widget.smsReaderService.consumePendingBackgroundMessages();
+    final pendingMessages = await widget.smsReaderService
+        .consumePendingBackgroundMessages();
     AppLogger.info(
       'OtpReaderPage',
       'Checked pending background SMS count.',
@@ -335,11 +464,13 @@ class _OtpReaderPageState extends State<OtpReaderPage>
 
   bool _sameIncomingMessage(SmsMessage left, SmsMessage right) =>
       left.sender.trim().toLowerCase() == right.sender.trim().toLowerCase() &&
-      left.receivedAt.millisecondsSinceEpoch == right.receivedAt.millisecondsSinceEpoch &&
+      left.receivedAt.millisecondsSinceEpoch ==
+          right.receivedAt.millisecondsSinceEpoch &&
       left.body.trim() == right.body.trim();
 
   Future<void> _consumeBackgroundHandledOtpKeys() async {
-    final handledKeys = await widget.smsReaderService.consumeBackgroundHandledOtpKeys();
+    final handledKeys = await widget.smsReaderService
+        .consumeBackgroundHandledOtpKeys();
     if (handledKeys.isEmpty) {
       return;
     }
@@ -376,7 +507,10 @@ class _OtpReaderPageState extends State<OtpReaderPage>
   }
 
   void _recordForegroundHandledIncomingOtpEventKeys(Iterable<String> keys) {
-    final normalizedKeys = keys.map((key) => key.trim()).where((key) => key.isNotEmpty).toSet();
+    final normalizedKeys = keys
+        .map((key) => key.trim())
+        .where((key) => key.isNotEmpty)
+        .toSet();
     if (normalizedKeys.isEmpty) {
       return;
     }
@@ -507,7 +641,7 @@ class _OtpReaderPageState extends State<OtpReaderPage>
         );
         final response = await widget.otpApiService.sendLatestOtp(
           match.otpCode,
-          appConfig: widget.appConfig,
+          appConfig: _appConfig,
         );
 
         await _saveApiCallHistoryEntrySafely(
@@ -549,7 +683,8 @@ class _OtpReaderPageState extends State<OtpReaderPage>
             'reason': error.message,
           },
         );
-        firstErrorMessage ??= 'Could not send OTP ${match.otpCode} to API: ${error.message}';
+        firstErrorMessage ??=
+            'Could not send OTP ${match.otpCode} to API: ${error.message}';
       } catch (error, stackTrace) {
         await _saveApiCallHistoryEntrySafely(
           otpCode: match.otpCode,
@@ -569,7 +704,8 @@ class _OtpReaderPageState extends State<OtpReaderPage>
             'sender': match.message.sender,
           },
         );
-        firstErrorMessage ??= 'Could not send OTP ${match.otpCode} to API: $error';
+        firstErrorMessage ??=
+            'Could not send OTP ${match.otpCode} to API: $error';
       }
     }
 
@@ -594,7 +730,10 @@ class _OtpReaderPageState extends State<OtpReaderPage>
       AppLogger.warn(
         'OtpReaderPage',
         'Skipped manual OTP API send because an inbox read is already in progress.',
-        data: <String, Object?>{'otpCode': match.otpCode, 'sender': match.message.sender},
+        data: <String, Object?>{
+          'otpCode': match.otpCode,
+          'sender': match.message.sender,
+        },
       );
       return;
     }
@@ -603,7 +742,10 @@ class _OtpReaderPageState extends State<OtpReaderPage>
       AppLogger.info(
         'OtpReaderPage',
         'Skipped manual OTP API send because the same message is already being sent.',
-        data: <String, Object?>{'otpCode': match.otpCode, 'sender': match.message.sender},
+        data: <String, Object?>{
+          'otpCode': match.otpCode,
+          'sender': match.message.sender,
+        },
       );
       return;
     }
@@ -655,14 +797,19 @@ class _OtpReaderPageState extends State<OtpReaderPage>
     iterator.moveNext();
     var latestMatch = iterator.current;
     while (iterator.moveNext()) {
-      if (!iterator.current.message.receivedAt.isBefore(latestMatch.message.receivedAt)) {
+      if (!iterator.current.message.receivedAt.isBefore(
+        latestMatch.message.receivedAt,
+      )) {
         latestMatch = iterator.current;
       }
     }
     return latestMatch;
   }
 
-  OtpMatch _resolveIncomingOtpMatch(List<OtpMatch> matches, OtpMatch incomingMatch) {
+  OtpMatch _resolveIncomingOtpMatch(
+    List<OtpMatch> matches,
+    OtpMatch incomingMatch,
+  ) {
     for (final match in matches) {
       if (_sameIncomingMessage(match.message, incomingMatch.message)) {
         return match;
@@ -693,14 +840,16 @@ class _OtpReaderPageState extends State<OtpReaderPage>
     for (final incomingMessage in incomingMessagesForSync) {
       final incomingMatch = widget.otpMessageFilter.matchMessage(
         incomingMessage,
-        senderFilters: widget.appConfig.senderFilters,
+        senderFilters: _appConfig.senderFilters,
       );
       if (incomingMatch == null) {
         continue;
       }
 
       final resolvedMatch = _resolveIncomingOtpMatch(matches, incomingMatch);
-      if (_backgroundHandledOtpMatchKeys.contains(_otpMatchSessionKey(resolvedMatch))) {
+      if (_backgroundHandledOtpMatchKeys.contains(
+        _otpMatchSessionKey(resolvedMatch),
+      )) {
         continue;
       }
 
@@ -772,8 +921,8 @@ class _OtpReaderPageState extends State<OtpReaderPage>
       'Starting OTP inbox read.',
       data: <String, Object?>{
         'syncNewOtpMatches': syncNewOtpMatches,
-          'incomingMessagesForSync': incomingMessagesForSync.length,
-        'senderFilters': widget.appConfig.senderFilters,
+        'incomingMessagesForSync': incomingMessagesForSync.length,
+        'senderFilters': _appConfig.senderFilters,
         'existingMatchCount': _otpMatches.length,
         'attemptedMessageCount': _attemptedOtpMessageIds.length,
         'backgroundHandledKeyCount': _backgroundHandledOtpMatchKeys.length,
@@ -789,7 +938,7 @@ class _OtpReaderPageState extends State<OtpReaderPage>
       final messages = await widget.smsReaderService.readAllMessages();
       final matches = widget.otpMessageFilter.filterMessages(
         messages,
-        senderFilters: widget.appConfig.senderFilters,
+        senderFilters: _appConfig.senderFilters,
       );
       if (!mounted) {
         return;
@@ -799,8 +948,12 @@ class _OtpReaderPageState extends State<OtpReaderPage>
           .where(
             (match) =>
                 !_attemptedOtpMessageIds.contains(match.message.id) &&
-                !_backgroundHandledOtpMatchKeys.contains(_otpMatchSessionKey(match)) &&
-                !_foregroundHandledIncomingOtpEventKeys.contains(_incomingOtpEventKey(match)),
+                !_backgroundHandledOtpMatchKeys.contains(
+                  _otpMatchSessionKey(match),
+                ) &&
+                !_foregroundHandledIncomingOtpEventKeys.contains(
+                  _incomingOtpEventKey(match),
+                ),
           )
           .toList(growable: false);
       final realtimeSelection = _selectRealtimeOtpMatchesToSync(
@@ -820,7 +973,7 @@ class _OtpReaderPageState extends State<OtpReaderPage>
           'newMatches': newOtpMatches.length,
           'realtimeMatchesToSync': realtimeOtpMatchesToSync.length,
           'incomingMessagesForSync': incomingMessagesForSync.length,
-          'senderFilters': widget.appConfig.senderFilters,
+          'senderFilters': _appConfig.senderFilters,
           'sampleMatches': matches
               .take(5)
               .map((match) => '${match.message.sender}:${match.otpCode}')
@@ -838,8 +991,12 @@ class _OtpReaderPageState extends State<OtpReaderPage>
         _otpMatches = matches;
       });
 
-      final apiSyncResult = await _sendOtpMatchesToApi(realtimeOtpMatchesToSync);
-      _recordForegroundHandledIncomingOtpEventKeys(realtimeSelection.incomingOtpEventKeys);
+      final apiSyncResult = await _sendOtpMatchesToApi(
+        realtimeOtpMatchesToSync,
+      );
+      _recordForegroundHandledIncomingOtpEventKeys(
+        realtimeSelection.incomingOtpEventKeys,
+      );
       _recordOtpMatchesAsSeen(newOtpMatches);
       if (!mounted) {
         return;
@@ -943,7 +1100,9 @@ class _OtpReaderPageState extends State<OtpReaderPage>
       AppLogger.info(
         'OtpReaderPage',
         'Permission dialog completed during manual refresh.',
-        data: <String, Object?>{'shouldRequestPermission': shouldRequestPermission},
+        data: <String, Object?>{
+          'shouldRequestPermission': shouldRequestPermission,
+        },
       );
 
       if (shouldRequestPermission != true) {
@@ -959,11 +1118,113 @@ class _OtpReaderPageState extends State<OtpReaderPage>
     await _readOtpMessages();
   }
 
-  Future<void> _openApiHistoryPage() async {
-    AppLogger.info('OtpReaderPage', 'Opening API history page.');
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (context) => ApiHistoryPage(smsReaderService: widget.smsReaderService),
+  Future<void> _openSettingsPage() async {
+    AppLogger.info('OtpReaderPage', 'Opening settings page.');
+    final updatedConfig = await Navigator.of(context).push<AppConfig>(
+      MaterialPageRoute<AppConfig>(
+        builder: (context) => SettingsPage(
+          initialConfig: _appConfig,
+          smsReaderService: widget.smsReaderService,
+        ),
+      ),
+    );
+    if (!mounted || updatedConfig == null) {
+      return;
+    }
+
+    AppLogger.info(
+      'OtpReaderPage',
+      'Applying updated runtime settings.',
+      data: <String, Object?>{
+        'senderFilters': updatedConfig.senderFilters,
+        'autoHandleEnabled': updatedConfig.autoHandleEnabled,
+        'autoAnswerNumbersCount': updatedConfig.autoAnswerNumbers.length,
+      },
+    );
+
+    setState(() {
+      _appConfig = updatedConfig;
+      if (!_shouldShowAutoAnswerSetup) {
+        _isDefaultDialer = false;
+      }
+    });
+
+    await widget.smsReaderService.syncBackgroundApiConfig(updatedConfig);
+    if (!mounted) {
+      return;
+    }
+
+    if (_shouldShowAutoAnswerSetup) {
+      await _loadDefaultDialerStatus();
+    } else {
+      setState(() {
+        _isDefaultDialer = false;
+      });
+    }
+
+    if (_hasPermission) {
+      await _readOtpMessages();
+    }
+  }
+
+  Widget _buildAutoAnswerCard(BuildContext context) {
+    final theme = Theme.of(context);
+    final configuredNumbers = _autoAnswerNumbers;
+    final configuredNumbersCount = configuredNumbers.length;
+
+    return PanelCard(
+      key: const ValueKey('auto-answer-card'),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SectionHeader(
+            icon: Icons.call_outlined,
+            title: 'Auto-answer configured calls',
+          ),
+          const SizedBox(height: 12),
+          Text(
+            '$configuredNumbersCount configured '
+            'number${configuredNumbersCount == 1 ? '' : 's'}',
+            style: theme.textTheme.bodyMedium?.copyWith(
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: configuredNumbers
+                .map(
+                  (number) => Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF6F5FF),
+                      borderRadius: BorderRadius.circular(999),
+                      border: Border.all(color: AppColors.secondaryBorder),
+                    ),
+                    child: Text(number, style: theme.textTheme.bodyMedium),
+                  ),
+                )
+                .toList(growable: false),
+          ),
+          if (!_isDefaultDialer) ...[
+            const SizedBox(height: 16),
+            FilledButton(
+              key: const ValueKey('request-default-dialer-button'),
+              onPressed: _isDialerRoleRequestInProgress
+                  ? null
+                  : _requestDefaultDialerRole,
+              child: Text(
+                _isDialerRoleRequestInProgress
+                    ? 'Waiting for Android…'
+                    : 'Set as default phone app',
+              ),
+            ),
+          ],
+        ],
       ),
     );
   }
@@ -977,10 +1238,10 @@ class _OtpReaderPageState extends State<OtpReaderPage>
         title: const Text('Mobile Auth Agent'),
         actions: [
           IconButton(
-            key: const ValueKey('open-api-history-button'),
-            onPressed: _openApiHistoryPage,
-            tooltip: 'API History',
-            icon: const Icon(Icons.history),
+            key: const ValueKey('open-settings-button'),
+            onPressed: _openSettingsPage,
+            tooltip: 'Settings',
+            icon: const Icon(Icons.settings),
           ),
         ],
       ),
@@ -1005,6 +1266,10 @@ class _OtpReaderPageState extends State<OtpReaderPage>
               otpMatchesCount: _otpMatches.length,
               isLoading: _isLoading,
             ),
+            if (_shouldShowAutoAnswerSetup) ...[
+              const SizedBox(height: 16),
+              _buildAutoAnswerCard(context),
+            ],
             if (_errorMessage != null) ...[
               const SizedBox(height: 16),
               PanelCard(
