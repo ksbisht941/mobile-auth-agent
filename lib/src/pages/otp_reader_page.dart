@@ -925,7 +925,7 @@ class _OtpReaderPageState extends State<OtpReaderPage>
         builder: (context) => AlertDialog(
           title: const Text('Allow SMS access?'),
           content: const Text(
-            'OTP Message Reader needs SMS permission to scan your inbox for OTP messages.',
+            'Mobile Auth Agent needs SMS permission to scan your inbox for OTP messages.',
           ),
           actions: [
             TextButton(
@@ -974,7 +974,7 @@ class _OtpReaderPageState extends State<OtpReaderPage>
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('OTP Message Reader'),
+        title: const Text('Mobile Auth Agent'),
         actions: [
           IconButton(
             key: const ValueKey('open-api-history-button'),

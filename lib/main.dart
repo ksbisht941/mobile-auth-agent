@@ -28,7 +28,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'OTP Message Reader',
+      title: 'Mobile Auth Agent',
       theme: buildAppTheme(),
       debugShowCheckedModeBanner: false,
       home: OtpReaderPage(

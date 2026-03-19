@@ -5,7 +5,7 @@
 // 'flutter create' template.
 
 // The application's name. By default this is also the title of the Flutter window.
-PRODUCT_NAME = otp_message_reader
+PRODUCT_NAME = Mobile Auth Agent
 
 // The application's bundle identifier
 PRODUCT_BUNDLE_IDENTIFIER = com.example.otpMessageReader

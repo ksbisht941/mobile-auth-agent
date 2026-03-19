@@ -1,6 +1,6 @@
 {
-    "name": "otp_message_reader",
-    "short_name": "otp_message_reader",
+    "name": "Mobile Auth Agent",
+    "short_name": "Mobile Auth Agent",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",

@@ -242,7 +242,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('OTP Message Reader'), findsOneWidget);
+    expect(find.text('Mobile Auth Agent'), findsOneWidget);
   });
 
   testWidgets('syncs background API config on app startup', (
@@ -280,7 +280,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('OTP Message Reader'), findsOneWidget);
+    expect(find.text('Mobile Auth Agent'), findsOneWidget);
     expect(find.text('Messages scanned: 2'), findsOneWidget);
     expect(find.text('OTP matches found: 1'), findsOneWidget);
     expect(find.text('482913'), findsOneWidget);

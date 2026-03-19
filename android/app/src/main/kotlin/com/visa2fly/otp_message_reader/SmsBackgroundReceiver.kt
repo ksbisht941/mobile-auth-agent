@@ -718,12 +718,12 @@ object SmsNotificationHelper {
 
     private fun notificationBody(messages: Array<android.telephony.SmsMessage>): String {
         if (messages.size > 1) {
-            return "Open OTP Message Reader to review the latest messages."
+            return "Open Mobile Auth Agent to review the latest messages."
         }
 
         val messageBody = messages.first().messageBody?.trim().orEmpty()
         return if (messageBody.isEmpty()) {
-            "Open OTP Message Reader to review the latest message."
+            "Open Mobile Auth Agent to review the latest message."
         } else {
             messageBody
         }
